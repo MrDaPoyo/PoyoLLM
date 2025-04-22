@@ -1,3 +1,5 @@
 datasets~=3.3.2
 torch
 pandas
+import-ipynb
+matplotlib
