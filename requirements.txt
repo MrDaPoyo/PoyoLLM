@@ -1,5 +1,7 @@
 datasets~=3.3.2
-torch
+torch==2.6.0+cu124 
+torchvision --index-url https://download.pytorch.org/whl/cu124 
+torchaudio --index-url https://download.pytorch.org/whl/cu124 
 pandas
-import-ipynb
+importnb
 matplotlib
