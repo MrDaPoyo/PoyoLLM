@@ -1,7 +1,8 @@
 datasets~=3.3.2
 torch==2.6.0+cu124 
-torchvision --index-url https://download.pytorch.org/whl/cu124 
-torchaudio --index-url https://download.pytorch.org/whl/cu124 
+torchvision
+torchaudio
 pandas
 importnb
 matplotlib
+tiktoken
