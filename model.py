@@ -1,468 +1,512 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# # The PoyoModel3000
-# This jupyter notebook will contain the model itself.
-
-# In[1]:
-
-
-import sys
-sys.path.append('.')
-from minbpe import BasicTokenizer
-
-tokenizer = BasicTokenizer()
-tokenizer.load(model_file="./output/tokenizer/poyo_tokenizer.model")
-def get_vocab_size(tokenizer: BasicTokenizer) -> int:
-    vocab = tokenizer.vocab
-    special_tokens = tokenizer.special_tokens
-
-    return len(vocab) + len(special_tokens)
-
-
-# In[2]:
-
-
-import torch
-torch.manual_seed(6969)
-
-block_size = 1024
-n_embd = 384
-n_head = 12
-n_layer = 12
-dropout = 0.2
-vocab_size = get_vocab_size(tokenizer)
-print(f"CUDA available: {torch.cuda.is_available()}")
-device = torch.cuda.is_available() and torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
-a = torch.tensor([0], dtype=torch.float32, device=device)  # Fixed the syntax error in tensor creation
-
-
-# # The Head (drama here)
-
-# In[3]:
-
-
-from typing import Optional, Tuple
+import os
+import math
+import time
+import inspect
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+# -----------------------------------------------------------------------------
 
+class CausalSelfAttention(nn.Module):
 
-class Head(nn.Module):
-    """ one head of self-attention btw I do not have an attention span """
-
-    def __init__(self, head_size: int) -> None:
+    def __init__(self, config):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(
-            torch.ones(block_size, block_size)))
+        assert config.n_embd % config.n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
+        # regularization
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
 
-        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
+        # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # output projection
+        y = self.c_proj(y)
+        return y
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # input of size (batch, time-step, channels)
-        # output of size (batch, time-step, head size)
-        _, T, _ = x.shape
-        k = self.key(x)   # (B,T,hs)
-        q = self.query(x)  # (B,T,hs)
-        # compute attention scores ("affinities")
-        # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        weights = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5
-        weights = weights.masked_fill(
-            self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
-        weights = F.softmax(weights, dim=-1)  # (B, T, T)
-        weights = self.dropout(weights)
-        # perform the weighted aggregation of the values
-        v = self.value(x)  # (B,T,hs)
-        out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
-        return out
+class MLP(nn.Module):
 
-
-# # Multi-Head Attention
-
-# In[4]:
-
-
-class MultiHeadAttention(nn.Module):
-    """ multiple heads of self-attention in parallel """
-
-    def __init__(self, num_heads: int, head_size: int) -> None:
+    def __init__(self, config):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.projection = nn.Linear(head_size * num_heads, n_embd)
-        self.dropout = nn.Dropout(dropout)
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu    = nn.GELU(approximate='tanh')
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.dropout(self.projection(out))
-        return out
-
-
-# # The BLOCK 
-
-# In[5]:
-
-
-class FeedFoward(nn.Module):
-    """ a simple linear layer followed by a non-linearity """
-
-    def __init__(self, n_embd: int) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-class Block(nn.Module):
-    """ Transformer block: communication followed by computation """
-
-    def __init__(self, n_embd: int, n_head: int) -> None:
-        # n_embd: embedding dimension, n_head: the number of heads we'd like
-        super().__init__()
-        head_size = n_embd // n_head
-        self.self_attention = MultiHeadAttention(n_head, head_size)
-        self.feed_forward = FeedFoward(n_embd)
-        self.layer_norm_1 = nn.LayerNorm(n_embd)
-        self.layer_norm_2 = nn.LayerNorm(n_embd)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.self_attention(self.layer_norm_1(x))
-        x = x + self.feed_forward(self.layer_norm_2(x))
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
         return x
 
+class Block(nn.Module):
 
-# # Assembling the model
-
-# In[6]:
-
-
-class GPTLanguageModel(nn.Module):
-
-    def __init__(self) -> None:
+    def __init__(self, config):
         super().__init__()
-        # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(
-            *[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.final_layer_norm = nn.LayerNorm(n_embd)
-        self.final_linear_layer = nn.Linear(n_embd, vocab_size)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = MLP(config)
 
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024 # max sequence length
+    vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    n_layer: int = 12 # number of layers
+    n_head: int = 12 # number of heads
+    n_embd: int = 768 # embedding dimension
+
+class GPT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # init params
         self.apply(self._init_weights)
 
-    def _init_weights(self, module: nn.Module) -> None:
+    def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass of the model.
-
-        Args:
-            input_tokens: Tensor of token indices of shape (batch_size, sequence_length)
-            targets: Optional tensor of target token indices of same shape as input_tokens
-
-        Returns:
-            Tuple of (logits, loss) where logits has shape (batch_size, sequence_length, vocab_size)
-            and loss is optional cross-entropy loss if targets are provided
-        """
-
-        B, T = input_tokens.shape
-
-        # input_tokens and targets are both (B,T) tensor of integers
-        token_embedding = self.token_embedding_table(input_tokens)  # (B,T,C)
-        positional_embedding = self.position_embedding_table(
-            torch.arange(T, device=device))  # (T,C)
-        x = token_embedding + positional_embedding  # (B,T,C)
-        x = self.blocks(x)  # (B,T,C)
-        x = self.final_layer_norm(x)  # (B,T,C)
-        logits = self.final_linear_layer(x)  # (B,T,vocab_size)
-
-        if targets is None:
-            loss = None
-        else:
-            B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
-            loss = F.cross_entropy(logits, targets)
-
+    def forward(self, idx, targets=None):
+        # idx is of shape (B, T)
+        _, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        # forward the token and posisition embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
+        x = tok_emb + pos_emb
+        # forward the blocks of the transformer
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layernorm and the classifier
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
-    def generate(self, input_tokens: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
-        """
-                Generate new tokens given a context.
+    @classmethod
+    def from_pretrained(cls, model_type):
+        """Loads pretrained GPT-2 model weights from huggingface"""
+        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+        from transformers import GPT2LMHeadModel
+        print("loading weights from pretrained gpt: %s" % model_type)
 
-                Args:>ns: Starting token indices of shape (batch_size, sequence_length)
-                        max_new_tokens: Number of new tokens to generate
+        # n_layer, n_head and n_embd are determined from model_type
+        config_args = {
+            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
+            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
+            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
+            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+        }[model_type]
+        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
+        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
+        # create a from-scratch initialized minGPT model
+        config = GPTConfig(**config_args)
+        model = GPT(config)
+        sd = model.state_dict()
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
 
-                Returns:
-                        Tensor of token indices of shape (batch_size, sequence_length + max_new_tokens)
-                """
+        # init a huggingface/transformers model
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = model_hf.state_dict()
 
-        # input_tokens is (B, T) array of indices in the current context
-        for _ in range(max_new_tokens):
-            # crop input_tokens to the last block_size tokens
-            cropped_input = input_tokens[:, -block_size:]
-            # get the predictions
-            logits, _ = self(cropped_input)
-            # focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C)
-            # apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1)  # (B, C)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            # append sampled index to the running sequence
-            input_tokens = torch.cat(
-                (input_tokens, idx_next), dim=1)  # (B, T+1)
-        return input_tokens
-
-
-# In[7]:
-
-
-model = GPTLanguageModel()
-model = model.to(device)
-# print the number of parameters in the model
-print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
-
-
-# I'll help you create a training loop for the PoyoLLM model. First, let's create a training function that includes learning rate scheduling, gradient clipping, and proper device handling.
-
-# In[8]:
-
-
-import torch
-from torch.optim import AdamW
-from torch.nn import functional as F
-import numpy as np
-from tqdm import tqdm
-
-def train_model(
-    model,
-    train_data,
-    val_data=None,
-    n_epochs=5,
-    batch_size=32,
-    learning_rate=3e-4,
-    max_grad_norm=1.0,
-    warmup_steps=2000,
-    eval_interval=500,
-    save_interval=1000,
-    checkpoint_dir='checkpoints'
-):
-    # Create optimizer
-    optimizer = AdamW(model.parameters(), lr=learning_rate)
-
-    # Learning rate scheduler
-    def get_lr(step, warmup_steps, learning_rate):
-        # Linear warmup followed by cosine decay
-        if step < warmup_steps:
-            return learning_rate * step / warmup_steps
-        return learning_rate * 0.5 * (1 + np.cos(np.pi * (step - warmup_steps) / (n_epochs * len(train_data) - warmup_steps)))
-
-    # Training loop
-    step = 0
-    best_val_loss = float('inf')
-
-    for epoch in range(n_epochs):
-        model.train()
-        pbar = tqdm(range(0, len(train_data), batch_size), desc=f'Epoch {epoch+1}/{n_epochs}')
-
-        for i in pbar:
-            # Get batch
-            batch_data = train_data[i:i+batch_size]
-            if isinstance(batch_data, torch.Tensor):
-                x = batch_data
-                y = batch_data
-            else:
-                x = torch.tensor(batch_data, dtype=torch.long, device=device)
-                y = torch.tensor(batch_data, dtype=torch.long, device=device)
-
-            # Forward pass
-            logits, loss = model(x, y)
-
-            # Backward pass
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-            # Update learning rate
-            lr = get_lr(step, warmup_steps, learning_rate)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-
-            # Update weights
-            optimizer.step()
-
-            # Update progress bar
-            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'lr': f'{lr:.2e}'})
-
-            # Evaluate on validation set
-            if val_data is not None and step % eval_interval == 0:
-                model.eval()
-                val_losses = []
+        # copy while ensuring all of the parameters are aligned and match in names and shapes
+        sd_keys_hf = sd_hf.keys()
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
+        # this means that we have to transpose these weights when we import them
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        for k in sd_keys_hf:
+            if any(k.endswith(w) for w in transposed):
+                # special treatment for the Conv1D weights we need to transpose
+                assert sd_hf[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
-                    for j in range(0, len(val_data), batch_size):
-                        val_batch = val_data[j:j+batch_size]
-                        if isinstance(val_batch, torch.Tensor):
-                            val_x = val_batch
-                            val_y = val_batch
-                        else:
-                            val_x = torch.tensor(val_batch, dtype=torch.long, device=device)
-                            val_y = torch.tensor(val_batch, dtype=torch.long, device=device)
-                        _, val_loss = model(val_x, val_y)
-                        val_losses.append(val_loss.item())
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                # vanilla copy over the other parameters
+                assert sd_hf[k].shape == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
 
-                avg_val_loss = np.mean(val_losses)
-                print(f'\nStep {step}: Validation loss: {avg_val_loss:.4f}')
+        return model
 
-                # Save best model
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'loss': best_val_loss,
-                    }, f'{checkpoint_dir}/best_model.pt')
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+        # start with all of the candidate parameters (that require grad)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for _, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for _, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        if master_process:
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"
+        if master_process:
+            print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
 
-                model.train()
+# -----------------------------------------------------------------------------
+import tiktoken
+import numpy as np
 
-            # Save periodic checkpoint
-            if step % save_interval == 0:
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss.item(),
-                }, f'{checkpoint_dir}/checkpoint_{step}.pt')
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astype(np.int32) # added after video
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
 
-            step += 1
+class DataLoaderLite:
+    def __init__(self, B, T, process_rank, num_processes, split):
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        assert split in {'train', 'val'}
 
-    return model
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        self.reset()
 
-print("Training function created successfully!")
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
 
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
+        return x, y
 
-# I'll create a helper function that loads the vocabulary and prepares the training data. Let me build this in steps.
+# -----------------------------------------------------------------------------
+# simple launch:
+# python train_gpt2.py
+# DDP launch for e.g. 8 GPUs:
+# torchrun --standalone --nproc_per_node=8 train_gpt2.py
 
-# In[17]:
+# run the training loop
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 
+# set up DDP (distributed data parallel).
+# torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    # use of DDP atm demands CUDA, we set the device appropriately according to rank
+    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+else:
+    # vanilla, non-DDP run
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    # attempt to autodetect device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"using device: {device}")
 
-def load_and_split_data(tokenizer, split_ratio=0.9, sequence_length=block_size):
-    # Load all text from decoder vocab
-    vocab_list = list(tokenizer.vocab.keys())
+# added after video, pytorch can be serious about it's device vs. device_type distinction
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-    # Convert text to token indices
-    tokens = []
-    for word in vocab_list:
-        token_ids = tokenizer.encode(word)
-        tokens.extend(token_ids)
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
-    # Convert to tensor
-    data = torch.tensor(tokens, dtype=torch.long, device=device)
+# Initialize a variable to track highest numbered checkpoint file
+highest_checkpoint = None
+highest_step = -1
+# Check if log directory exists
+if os.path.exists("log"):
+    # Look for model checkpoint files
+    for filename in os.listdir("log"):
+        if filename.startswith("model_") and filename.endswith(".pt"):
+            try:
+                # Extract step number from filename
+                step = int(filename[6:-3])  # Remove "model_" prefix and ".pt" suffix
+                if step > highest_step:
+                    highest_step = step
+                    highest_checkpoint = os.path.join("log", filename)
+            except ValueError:
+                # Skip files that don't follow the expected naming pattern
+                continue
+    # Load the checkpoint with highest step number if found
+    if highest_checkpoint is not None and os.path.exists(highest_checkpoint):
+        if master_process:
+            print(f"Loading model from checkpoint: {highest_checkpoint}")
+        checkpoint = torch.load(highest_checkpoint, map_location=device)
+        # Depending on your needs, you might want to load model weights, optimizer state, etc.
 
-    # Create sequences of fixed length
-    n_sequences = len(data) - sequence_length
-    sequences = torch.stack([data[i:i+sequence_length] for i in range(n_sequences)])
+enc = tiktoken.get_encoding("gpt2")
 
-    # Split into train and validation
-    split_idx = int(len(sequences) * split_ratio)
-    train_data = sequences[:split_idx]
-    val_data = sequences[split_idx:]
+total_batch_size = 16 * 256
+B = 16 # micro batch size
+T = 256 # sequence length
+assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-    print(f"Total sequences: {len(sequences)}")
-    print(f"Training sequences: {len(train_data)}")
-    print(f"Validation sequences: {len(val_data)}")
+train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
 
-    return train_data, val_data
+torch.set_float32_matmul_precision('high')
 
-# Test the function
-train_data, val_data = load_and_split_data(tokenizer)
+# create model
+model = GPT(GPTConfig(vocab_size=50304))
+# model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+model.to(device)
+use_compile = False # torch.compile interferes with Generation. TODO fix
+if use_compile:
+    model = torch.compile(model)
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 715
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
 
-# In[20]:
+# optimize!
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
+# create the log directory we will write checkpoints to and log to
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    # Load the latest checkpoint if it exists
+    def get_latest_checkpoint():
+        checkpoints = [f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")]
+        if not checkpoints:
+            return None
+        
+        # Extract step numbers and find the latest
+        steps = [int(f.split("_")[1].split(".")[0]) for f in checkpoints]
+        latest_idx = steps.index(max(steps))
+        return os.path.join(log_dir, checkpoints[latest_idx])
 
-def load_and_split_data(tokenizer, split_ratio=0.9, sequence_length=block_size):
-    # Get all text from vocab (converting integers to strings if necessary)
-    vocab_list = []
-    for word in tokenizer.vocab.keys():
-        if isinstance(word, int):
-            vocab_list.append(str(word))
-        else:
-            vocab_list.append(word)
+    start_step = 0
+    latest_checkpoint_path = get_latest_checkpoint()
+    if latest_checkpoint_path and master_process:
+        print(f"Loading checkpoint from {latest_checkpoint_path}")
+        checkpoint = torch.load(latest_checkpoint_path)
+        raw_model.load_state_dict(checkpoint['model'])
+        start_step = checkpoint['step'] + 1
+        print(f"Resuming from step {start_step}, previous validation loss: {checkpoint['val_loss']:.4f}")
 
-    # Join all words with spaces
-    text = " ".join(vocab_list)
+    # Make sure all processes have the same start step
+    if ddp:
+        start_step_tensor = torch.tensor([start_step], device=device)
+        dist.broadcast(start_step_tensor, src=0)
+        start_step = start_step_tensor.item()
 
-    # Convert text to token indices
-    tokens = tokenizer.encode(text)
+for step in range(max_steps):
+    t0 = time.time()
+    last_step = (step == max_steps - 1)
 
-    # Convert to tensor
-    data = torch.tensor(tokens, dtype=torch.long, device=device)
+    # once in a while evaluate our validation loss
+    if step % 250 == 0 or last_step:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step > 0 and (step % 500 == 0 or last_step):
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item()
+                }
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, checkpoint_path)
 
-    # Create sequences of fixed length
-    n_sequences = len(data) - sequence_length
-    if n_sequences <= 0:
-        raise ValueError(f"Data length ({len(data)}) is shorter than sequence length ({sequence_length})")
+    # once in a while generate from the model (except step 0, which is noise)
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
+        model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank)
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(xgen) # (B, T, vocab_size)
+                # take the logits at the last position
+                logits = logits[:, -1, :] # (B, vocab_size)
+                # get the probabilities
+                probs = F.softmax(logits, dim=-1)
+                # do top-k sampling of 50 (huggingface pipeline default)
+                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # select a token from the top-k probabilities
+                # note: multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # (B, 1)
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+                # append to the sequence
+                xgen = torch.cat((xgen, xcol), dim=1)
+        # print the generated text
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"rank {ddp_rank} sample {i}: {decoded}")
 
-    sequences = torch.stack([data[i:i+sequence_length] for i in range(n_sequences)])
+    # do one step of the optimization
+    model.train()
+    optimizer.zero_grad()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        # added after video, this field is also used by the forward pass.
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        # we have to scale the loss to account for gradient accumulation,
+        # because the gradients just add on each successive backward().
+        # addition of gradients corresponds to a SUM in the objective, but
+        # instead of a SUM we want MEAN. Scale the loss here so it comes out right
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    # determine and set the learning rate for this iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    optimizer.step()
+    if device_type == "cuda":
+        torch.cuda.synchronize() # wait for the GPU to finish work
+    t1 = time.time()
+    dt = t1 - t0 # time difference in seconds
+    tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+    tokens_per_sec = tokens_processed / dt
+    if master_process:
+        print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 
-    # Split into train and validation
-    split_idx = int(len(sequences) * split_ratio)
-    train_data = sequences[:split_idx]
-    val_data = sequences[split_idx:]
-
-    print(f"Total sequences: {len(sequences)}")
-    print(f"Training sequences: {len(train_data)}")
-    print(f"Validation sequences: {len(val_data)}")
-
-    return train_data, val_data
-
-# Test the function
-train_data, val_data = load_and_split_data(tokenizer)
-
-
-# In[23]:
-
-
-# Now we can try training the model with our data
-from pathlib import Path
-
-# Create checkpoints directory if it doesn't exist
-Path("checkpoints").mkdir(exist_ok=True)
-
-# Start training
-train_model(
-    model=model,
-    train_data=train_data,
-    val_data=val_data,
-    n_epochs=3,
-    batch_size=32,
-    learning_rate=3e-4,
-    warmup_steps=100,
-    eval_interval=100,
-    save_interval=500,
-    checkpoint_dir='checkpoints'
-)
-
-
-# <a style='text-decoration:none;line-height:16px;display:flex;color:#5B5B62;padding:10px;justify-content:end;' href='https://deepnote.com?utm_source=created-in-deepnote-cell&projectId=5a923484-3c6f-40ab-ba4a-906a4dff832d' target="_blank">
-# <img alt='Created in deepnote.com' style='display:inline;max-height:16px;margin:0px;margin-right:7.5px;' src='data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHN2ZyB3aWR0aD0iODBweCIgaGVpZ2h0PSI4MHB4IiB2aWV3Qm94PSIwIDAgODAgODAiIHZlcnNpb249IjEuMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayI+CiAgICA8IS0tIEdlbmVyYXRvcjogU2tldGNoIDU0LjEgKDc2NDkwKSAtIGh0dHBzOi8vc2tldGNoYXBwLmNvbSAtLT4KICAgIDx0aXRsZT5Hcm91cCAzPC90aXRsZT4KICAgIDxkZXNjPkNyZWF0ZWQgd2l0aCBTa2V0Y2guPC9kZXNjPgogICAgPGcgaWQ9IkxhbmRpbmciIHN0cm9rZT0ibm9uZSIgc3Ryb2tlLXdpZHRoPSIxIiBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPgogICAgICAgIDxnIGlkPSJBcnRib2FyZCIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTEyMzUuMDAwMDAwLCAtNzkuMDAwMDAwKSI+CiAgICAgICAgICAgIDxnIGlkPSJHcm91cC0zIiB0cmFuc2Zvcm09InRyYW5zbGF0ZSgxMjM1LjAwMDAwMCwgNzkuMDAwMDAwKSI+CiAgICAgICAgICAgICAgICA8cG9seWdvbiBpZD0iUGF0aC0yMCIgZmlsbD0iIzAyNjVCNCIgcG9pbnRzPSIyLjM3NjIzNzYyIDgwIDM4LjA0NzY2NjcgODAgNTcuODIxNzgyMiA3My44MDU3NTkyIDU3LjgyMTc4MjIgMzIuNzU5MjczOSAzOS4xNDAyMjc4IDMxLjY4MzE2ODMiPjwvcG9seWdvbj4KICAgICAgICAgICAgICAgIDxwYXRoIGQ9Ik0zNS4wMDc3MTgsODAgQzQyLjkwNjIwMDcsNzYuNDU0OTM1OCA0Ny41NjQ5MTY3LDcxLjU0MjI2NzEgNDguOTgzODY2LDY1LjI2MTk5MzkgQzUxLjExMjI4OTksNTUuODQxNTg0MiA0MS42NzcxNzk1LDQ5LjIxMjIyODQgMjUuNjIzOTg0Niw0OS4yMTIyMjg0IEMyNS40ODQ5Mjg5LDQ5LjEyNjg0NDggMjkuODI2MTI5Niw0My4yODM4MjQ4IDM4LjY0NzU4NjksMzEuNjgzMTY4MyBMNzIuODcxMjg3MSwzMi41NTQ0MjUgTDY1LjI4MDk3Myw2Ny42NzYzNDIxIEw1MS4xMTIyODk5LDc3LjM3NjE0NCBMMzUuMDA3NzE4LDgwIFoiIGlkPSJQYXRoLTIyIiBmaWxsPSIjMDAyODY4Ij48L3BhdGg+CiAgICAgICAgICAgICAgICA8cGF0aCBkPSJNMCwzNy43MzA0NDA1IEwyNy4xMTQ1MzcsMC4yNTcxMTE0MzYgQzYyLjM3MTUxMjMsLTEuOTkwNzE3MDEgODAsMTAuNTAwMzkyNyA4MCwzNy43MzA0NDA1IEM4MCw2NC45NjA0ODgyIDY0Ljc3NjUwMzgsNzkuMDUwMzQxNCAzNC4zMjk1MTEzLDgwIEM0Ny4wNTUzNDg5LDc3LjU2NzA4MDggNTMuNDE4MjY3Nyw3MC4zMTM2MTAzIDUzLjQxODI2NzcsNTguMjM5NTg4NSBDNTMuNDE4MjY3Nyw0MC4xMjg1NTU3IDM2LjMwMzk1NDQsMzcuNzMwNDQwNSAyNS4yMjc0MTcsMzcuNzMwNDQwNSBDMTcuODQzMDU4NiwzNy43MzA0NDA1IDkuNDMzOTE5NjYsMzcuNzMwNDQwNSAwLDM3LjczMDQ0MDUgWiIgaWQ9IlBhdGgtMTkiIGZpbGw9IiMzNzkzRUYiPjwvcGF0aD4KICAgICAgICAgICAgPC9nPgogICAgICAgIDwvZz4KICAgIDwvZz4KPC9zdmc+' > </img>
-# Created in <span style='font-weight:600;margin-left:4px;'>Deepnote</span></a>
-
-# <div style="font-size: 10px; color: #666; text-align: right;">This notebook was converted with <a href="https://convert.ploomber.io">convert.ploomber.io</a></div>
+if ddp:
+    destroy_process_group()
