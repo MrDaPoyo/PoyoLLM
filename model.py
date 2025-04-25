@@ -70,7 +70,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # max sequence length
-    vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    vocab_size: int = 50259 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 3 special tokens
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
@@ -320,30 +320,49 @@ if os.path.exists("log"):
         if master_process:
             print(f"Loading model from checkpoint: {highest_checkpoint}")
 
-        # Add GPTConfig to the allowed globals
-        torch.serialization.add_safe_globals([GPTConfig])
-
         # Load the checkpoint
         checkpoint = torch.load(highest_checkpoint, map_location=device)
-        
-        # Extract model state_dict, optimizer state_dict, and any other needed states from the checkpoint
+
+        # Extract model state_dict, config, and step number from the checkpoint
         model_state_dict = checkpoint['model']
-        optimizer_state_dict = checkpoint.get('optimizer_state_dict', None)
-        step = checkpoint.get('step', 0)  # Get the step number from the checkpoint (default is 0)
+        config = checkpoint['config'] # Load config from checkpoint
+        step = checkpoint.get('step', 0) # Get the step number from the checkpoint
+        optimizer_state_dict = checkpoint.get('optimizer_state_dict', None) # Get optimizer state if saved
 
-        # Create the model and load the state_dict
-        model = GPT(GPTConfig(vocab_size=50304))  # Ensure GPTConfig is properly defined
+        # Create the model using the config from the checkpoint and load the state_dict
+        model = GPT(config)
         model.load_state_dict(model_state_dict)
-        
-        if optimizer_state_dict:
-            optimizer.load_state_dict(optimizer_state_dict)
 
-        # Resume training from the last checkpoint step
-        print(f"Resuming training from step {step}")
+        if master_process:
+            print(f"Resuming training from step {step}")
+    else:
+        # Initialize a new model from scratch if no checkpoint is found
+        if master_process:
+            print("No checkpoint found, initializing model from scratch.")
+        # Setup tokenization early to get vocab_size (needed for model init)
+        enc = tiktoken.get_encoding("gpt2")
+        vocab_size = enc.n_vocab
+        # Create a new model configuration (using defaults from GPTConfig or specify)
+        # Adjust GPTConfig parameters as needed for scratch training
+        config = GPTConfig(vocab_size=vocab_size) # Uses defaults: block_size=1024, n_layer=12, n_head=12, n_embd=768
+        model = GPT(config)
+        step = 0 # Start from step 0
+        optimizer_state_dict = None # No optimizer state to load
+
+# Note: The optimizer is created later in the script.
+# The optimizer state loading (if optimizer_state_dict is not None) should happen after optimizer creation.
+# The training loop should start from the loaded 'step'.
 
 # Setup tokenization and batch settings
 enc = tiktoken.get_encoding("gpt2")
-
+enc._special_tokens = {
+    "<|endoftext|>": 50256, # end of text token
+    "<|pad|>": 50257, # padding token
+    "<|sep|>": 50258, # separator token
+}
+eot = enc._special_tokens['<|endoftext|>'] # end of text token
+pad = enc._special_tokens['<|pad|>'] # padding token
+sep = enc._special_tokens['<|sep|>'] # padding token
 B = 16  # micro batch size
 T = 256  # sequence length
 total_batch_size = B * T

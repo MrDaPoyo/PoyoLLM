@@ -28,7 +28,14 @@ fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
 
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")
+enc._special_tokens = {
+    "<|endoftext|>": 50256, # end of text token
+    "<|pad|>": 50257, # padding token
+    "<|sep|>": 50258, # separator token
+}
 eot = enc._special_tokens['<|endoftext|>'] # end of text token
+pad = enc._special_tokens['<|pad|>'] # padding token
+sep = enc._special_tokens['<|sep|>'] # padding token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
     tokens = [eot] # the special <|endoftext|> token delimits all documents
