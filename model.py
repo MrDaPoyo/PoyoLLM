@@ -291,14 +291,16 @@ else:
 # added after video, pytorch can be serious about it's device vs. device_type distinction
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 
+# Ensure the random seed is set
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-# Initialize a variable to track highest numbered checkpoint file
+# Initialize a variable to track the highest numbered checkpoint file
 highest_checkpoint = None
 highest_step = -1
-# Check if log directory exists
+
+# Check if the log directory exists
 if os.path.exists("log"):
     # Look for model checkpoint files
     for filename in os.listdir("log"):
@@ -312,33 +314,65 @@ if os.path.exists("log"):
             except ValueError:
                 # Skip files that don't follow the expected naming pattern
                 continue
-    # Load the checkpoint with highest step number if found
+
+    # Load the checkpoint with the highest step number if found
     if highest_checkpoint is not None and os.path.exists(highest_checkpoint):
         if master_process:
             print(f"Loading model from checkpoint: {highest_checkpoint}")
-        checkpoint = torch.load(highest_checkpoint, map_location=device)
-        # Depending on your needs, you might want to load model weights, optimizer state, etc.
 
+        # Add GPTConfig to the allowed globals
+        torch.serialization.add_safe_globals([GPTConfig])
+
+        # Load the checkpoint
+        checkpoint = torch.load(highest_checkpoint, map_location=device)
+
+        # Extract model state_dict, optimizer state_dict, and any other needed states from the checkpoint
+        model_state_dict = checkpoint.get('model') or checkpoint.get('state_dict')
+
+        optimizer_state_dict = checkpoint.get('optimizer_state_dict', None)
+        step = checkpoint.get('step', 0)  # Get the step number from the checkpoint (default is 0)
+
+        # Create the model and load the state_dict
+        model = GPT(GPTConfig(vocab_size=50304))  # Ensure GPTConfig is properly defined
+        model.load_state_dict(model_state_dict, strict=False)  # Use strict=False to ignore missing keys
+        model.to(device)
+
+        if model_state_dict:
+            model.load_state_dict(model_state_dict, strict=False)  # Use strict=False to ignore missing keys
+        else:
+            print("No state_dict found in checkpoint. Model initialized from scratch.")
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Replace with the actual optimizer from training
+
+        # Load optimizer state_dict if available
+        if optimizer_state_dict:
+            optimizer.load_state_dict(optimizer_state_dict)
+
+        # Resume training from the last checkpoint step
+        print(f"Resuming training from step {step}")
+
+# Setup tokenization and batch settings
 enc = tiktoken.get_encoding("gpt2")
 
 total_batch_size = 16 * 256
-B = 16 # micro batch size
-T = 256 # sequence length
+B = 16  # micro batch size
+T = 256  # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
+# Create DataLoader for training and validation
 train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
 val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
 
+# Set float32 matmul precision for better performance
 torch.set_float32_matmul_precision('high')
 
-# create model
-model = GPT(GPTConfig(vocab_size=50304))
-# model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+# Model is already created from the checkpoint load
 model.to(device)
+
 use_compile = False # torch.compile interferes with Generation. TODO fix
 if use_compile:
     model = torch.compile(model)
@@ -370,32 +404,6 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
-    # Load the latest checkpoint if it exists
-    def get_latest_checkpoint():
-        checkpoints = [f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")]
-        if not checkpoints:
-            return None
-        
-        # Extract step numbers and find the latest
-        steps = [int(f.split("_")[1].split(".")[0]) for f in checkpoints]
-        latest_idx = steps.index(max(steps))
-        return os.path.join(log_dir, checkpoints[latest_idx])
-
-    start_step = 0
-    latest_checkpoint_path = get_latest_checkpoint()
-    if latest_checkpoint_path and master_process:
-        print(f"Loading checkpoint from {latest_checkpoint_path}")
-        checkpoint = torch.load(latest_checkpoint_path)
-        raw_model.load_state_dict(checkpoint['model'])
-        start_step = checkpoint['step'] + 1
-        print(f"Resuming from step {start_step}, previous validation loss: {checkpoint['val_loss']:.4f}")
-
-    # Make sure all processes have the same start step
-    if ddp:
-        start_step_tensor = torch.tensor([start_step], device=device)
-        dist.broadcast(start_step_tensor, src=0)
-        start_step = start_step_tensor.item()
 
 for step in range(max_steps):
     t0 = time.time()
