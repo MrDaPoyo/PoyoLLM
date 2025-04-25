@@ -231,32 +231,81 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
+import os
+
 # Main execution
 if __name__ == "__main__":
     # Initialize a model
     print("Initializing a GPT model...")
-    model = GPT(GPTConfig())
-    
-    # Check if CUDA is available and set device accordingly
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    model = model.to(device)
-    
+
+    # Check for existing checkpoints in the "log" directory
+    highest_step = -1
+    highest_checkpoint = None
+
+    if os.path.exists("log"):
+        # Look for model checkpoint files
+        for filename in os.listdir("log"):
+            if filename.startswith("model_") and filename.endswith(".pt"):
+                try:
+                    # Extract step number from filename
+                    step = int(filename[6:-3])  # Remove "model_" prefix and ".pt" suffix
+                    if step > highest_step:
+                        highest_step = step
+                        highest_checkpoint = os.path.join("log", filename)
+                except ValueError:
+                    # Skip files that don't follow the expected naming pattern
+                    continue
+
+    # Load the checkpoint with the highest step number if found
+    if highest_checkpoint is not None and os.path.exists(highest_checkpoint):
+        print(f"Loading model from checkpoint: {highest_checkpoint}")
+
+        # Add GPTConfig to the allowed globals
+        torch.serialization.add_safe_globals([GPTConfig])
+
+        # Load the checkpoint
+        checkpoint = torch.load(highest_checkpoint, map_location=device)
+
+        # Extract model state_dict, optimizer state_dict, and any other needed states from the checkpoint
+        model_state_dict = checkpoint['model']
+        optimizer_state_dict = checkpoint.get('optimizer_state_dict', None)
+        step = checkpoint.get('step', 0)  # Get the step number from the checkpoint (default is 0)
+
+        # Create the model and load the state_dict
+        model = GPT(GPTConfig())
+        model.load_state_dict(model_state_dict)
+        model = model.to(device)
+
+        # Create the optimizer and load its state_dict if available
+        optimizer = model.configure_optimizers(weight_decay=0.01, learning_rate=3e-4, device_type=device)
+        if optimizer_state_dict:
+            optimizer.load_state_dict(optimizer_state_dict)
+
+        print(f"Resuming training from step {step}")
+    else:
+        # No checkpoint found, initialize a new model
+        model = GPT(GPTConfig())
+        model = model.to(device)
+        optimizer = model.configure_optimizers(weight_decay=0.01, learning_rate=3e-4, device_type=device)
+        print("No checkpoint found. Starting from scratch.")
+
     # Try to generate some text
     print("Generating sample text:")
     prompt = "The thing I like most is"
-    
+
     # Tokenize the prompt
     enc = tiktoken.get_encoding("gpt2")
     tokens = torch.tensor([enc.encode(prompt)], dtype=torch.long).to(device)
-    
+
     # Generate text
     generated = model.generate(tokens, max_new_tokens=50, temperature=0.8)
-    
+
     # Decode the generated tokens
     generated_text = enc.decode(generated[0].tolist())
     print(f"Generated: {generated_text}")
-    
+
     print("Model parameters summary:")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")

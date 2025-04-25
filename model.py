@@ -325,25 +325,16 @@ if os.path.exists("log"):
 
         # Load the checkpoint
         checkpoint = torch.load(highest_checkpoint, map_location=device)
-
+        
         # Extract model state_dict, optimizer state_dict, and any other needed states from the checkpoint
-        model_state_dict = checkpoint.get('model') or checkpoint.get('state_dict')
-
+        model_state_dict = checkpoint['model']
         optimizer_state_dict = checkpoint.get('optimizer_state_dict', None)
         step = checkpoint.get('step', 0)  # Get the step number from the checkpoint (default is 0)
 
         # Create the model and load the state_dict
         model = GPT(GPTConfig(vocab_size=50304))  # Ensure GPTConfig is properly defined
-        model.load_state_dict(model_state_dict, strict=False)  # Use strict=False to ignore missing keys
-        model.to(device)
-
-        if model_state_dict:
-            model.load_state_dict(model_state_dict, strict=False)  # Use strict=False to ignore missing keys
-        else:
-            print("No state_dict found in checkpoint. Model initialized from scratch.")
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Replace with the actual optimizer from training
-
-        # Load optimizer state_dict if available
+        model.load_state_dict(model_state_dict)
+        
         if optimizer_state_dict:
             optimizer.load_state_dict(optimizer_state_dict)
 
@@ -353,9 +344,10 @@ if os.path.exists("log"):
 # Setup tokenization and batch settings
 enc = tiktoken.get_encoding("gpt2")
 
-total_batch_size = 16 * 256
 B = 16  # micro batch size
 T = 256  # sequence length
+total_batch_size = B * T
+
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
