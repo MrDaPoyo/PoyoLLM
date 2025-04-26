@@ -71,8 +71,8 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # max sequence length
-    vocab_size: int = 50304 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    block_size: int = 256 # max sequence length
+    vocab_size: int = 50261 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
@@ -128,49 +128,63 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
-    def generate(self, prompt, max_new_tokens, temperature=1.0, top_k=50):
-        """Generate text from a prompt"""
-        # Convert the prompt to a tensor if it's not already
-        if isinstance(prompt, str):
-            enc = tiktoken.get_encoding("gpt2")
-            prompt = torch.tensor(enc.encode(prompt), dtype=torch.long)[None, :]
-        
-        # Move to the device the model is on
-        prompt = prompt.to(next(self.parameters()).device)
-        
-        # Set the model to evaluation mode
+    def generate_response(self, tokenizer, prompt, max_new_tokens=50, temperature=0.7, top_k=50):
+        """Generates a response using the fine-tuned PoyoSLM model with sampling."""
         self.eval()
-        
-        # Start with the provided prompt
-        idx = prompt
-        
-        # Generate max_new_tokens new tokens
-        for _ in range(max_new_tokens):
-            # Get only the last block_size tokens if input is too long
-            idx_cond = idx[:, -self.config.block_size:]
-            
-            # Forward pass
-            with torch.no_grad():
-                logits, _ = self.forward(idx_cond)
-            
-            # Focus on the last token's predictions
-            logits = logits[:, -1, :] / temperature
-            
-            # Apply top-k filtering
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
-            
-            # Apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1)
-            
-            # Sample from the probability distribution
-            next_token = torch.multinomial(probs, num_samples=1)
-            
-            # Append the sampled token
-            idx = torch.cat((idx, next_token), dim=1)
-            
-        return idx
+        sot_token_id = tokenizer.encode("<|sot|>", allowed_special="all")[0]
+        eot_token_id = tokenizer.encode("<|eot|>", allowed_special="all")[0]
+        eod_token_id = tokenizer.encode("<|eod|>", allowed_special="all")[0]
+
+        prompt_text = f"<|sot|>user: {prompt}<|eot|><|sot|>assistant:"
+        input_ids = tokenizer.encode(prompt_text, allowed_special="all")
+        input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
+
+        generated_ids = input_ids[:]
+        max_seq_len = model.config.block_size # Get max length from model config
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                # Ensure input sequence doesn't exceed model's max length
+                # Truncate from the left if it does
+                current_input_tensor = input_tensor[:, -max_seq_len:]
+
+                # Forward pass
+                logits, _ = self(current_input_tensor) # Get logits, ignore loss
+                # Get logits for the very last token prediction
+                next_token_logits = logits[:, -1, :] # Shape: (batch_size=1, vocab_size)
+
+                # Apply temperature scaling
+                if temperature > 0 and temperature != 1.0:
+                    next_token_logits = next_token_logits / temperature
+
+                # Apply top-k filtering
+                if top_k > 0:
+                    v, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
+                    next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
+
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token_id = torch.multinomial(probs, num_samples=1).item()
+
+                generated_ids.append(next_token_id)
+                input_tensor = torch.cat((input_tensor, torch.tensor([[next_token_id]], device=device)), dim=1)
+
+                if next_token_id in [eot_token_id, eod_token_id]:
+                    break
+
+        full_response_text = tokenizer.decode(generated_ids)
+
+        # Extract only the assistant's part
+        assistant_marker = "<|sot|>assistant:"
+        marker_pos = full_response_text.rfind(assistant_marker)
+        if marker_pos != -1:
+            assistant_response = full_response_text[marker_pos + len(assistant_marker):]
+        else:
+            assistant_response = full_response_text # Fallback
+
+        # Clean up trailing special tokens
+        assistant_response = assistant_response.replace("<|eot|>", "").replace("<|eod|>", "").strip()
+
+        return assistant_response
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -260,13 +274,13 @@ if __name__ == "__main__":
 
     # Load the checkpoint with the highest step number if found
     if highest_checkpoint is not None and os.path.exists(highest_checkpoint):
-        print(f"Loading model from checkpoint: {highest_checkpoint}")
+        print(f"Loading model from checkpoint: log/poyoSLM_finetuned.pt")
 
         # Add GPTConfig to the allowed globals
         torch.serialization.add_safe_globals([GPTConfig])
 
         # Load the checkpoint
-        checkpoint = torch.load(highest_checkpoint, map_location=device)
+        checkpoint = torch.load("log/poyoSLM_finetuned.pt", map_location=device, weights_only=False)
 
         # Extract model state_dict, optimizer state_dict, and any other needed states from the checkpoint
         model_state_dict = checkpoint['model']
@@ -292,19 +306,33 @@ if __name__ == "__main__":
         print("No checkpoint found. Starting from scratch.")
 
     # Try to generate some text
-    print("Generating sample text:")
-    prompt = "Hi bestie!"
+    prompt = "Hello"
+    print(f"User: {prompt}")
+
+    PAD_TOKEN_ID = 50257 # Often used for padding
+    EOT_TOKEN_ID = 50258 # End of Turn
+    SOT_TOKEN_ID = 50259 # Start of Turn
+    EOD_TOKEN_ID = 50260 # End of Document/Dialogue
 
     # Tokenize the prompt
-    enc = tiktoken.get_encoding("gpt2")
+    base_enc = tiktoken.get_encoding("gpt2")
+    special_tokens = {
+        "<|pad|>": PAD_TOKEN_ID,
+        "<|eot|>": EOT_TOKEN_ID,
+        "<|sot|>": SOT_TOKEN_ID,
+        "<|eod|>": EOD_TOKEN_ID,
+    }
+    enc = tiktoken.Encoding(
+        name="gpt2_with_special_tokens",
+        pat_str=base_enc._pat_str,
+        mergeable_ranks=base_enc._mergeable_ranks,
+        special_tokens={**base_enc._special_tokens, **special_tokens}
+    )
     tokens = torch.tensor([enc.encode(prompt)], dtype=torch.long).to(device)
 
-    # Generate text
-    generated = model.generate(tokens, max_new_tokens=50, temperature=0.8)
+    generated_text = model.generate_response(tokenizer=enc, prompt=prompt, max_new_tokens=100, temperature=0.8, top_k=50)
 
-    # Decode the generated tokens
-    generated_text = enc.decode(generated[0].tolist())
-    print(f"Generated: {generated_text}")
+    print(f"Assistant: {generated_text}")
 
     print("Model parameters summary:")
     total_params = sum(p.numel() for p in model.parameters())

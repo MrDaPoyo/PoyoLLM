@@ -70,7 +70,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # max sequence length
-    vocab_size: int = 50259 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 3 special tokens
+    vocab_size: int = 50261 # vocab size, 50257 for gpt2
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
@@ -321,7 +321,8 @@ if os.path.exists("log"):
             print(f"Loading model from checkpoint: {highest_checkpoint}")
 
         # Load the checkpoint
-        checkpoint = torch.load(highest_checkpoint, map_location=device)
+        torch.serialization.safe_globals([GPTConfig])
+        checkpoint = torch.load(highest_checkpoint, map_location=device, weights_only=False)
 
         # Extract model state_dict, config, and step number from the checkpoint
         model_state_dict = checkpoint['model']
@@ -349,20 +350,8 @@ if os.path.exists("log"):
         step = 0 # Start from step 0
         optimizer_state_dict = None # No optimizer state to load
 
-# Note: The optimizer is created later in the script.
-# The optimizer state loading (if optimizer_state_dict is not None) should happen after optimizer creation.
-# The training loop should start from the loaded 'step'.
 
-# Setup tokenization and batch settings
 enc = tiktoken.get_encoding("gpt2")
-enc._special_tokens = {
-    "<|endoftext|>": 50256, # end of text token
-    "<|pad|>": 50257, # padding token
-    "<|sep|>": 50258, # separator token
-}
-eot = enc._special_tokens['<|endoftext|>'] # end of text token
-pad = enc._special_tokens['<|pad|>'] # padding token
-sep = enc._special_tokens['<|sep|>'] # padding token
 B = 16  # micro batch size
 T = 256  # sequence length
 total_batch_size = B * T
