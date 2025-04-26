@@ -133,6 +133,7 @@ def apply_rotary_emb_torch(
     xq: torch.Tensor,      # Query tensor, shape (batch, num_heads, seq_len, head_dim)
     xk: torch.Tensor,      # Key tensor, shape (batch, num_heads, seq_len, head_dim) - Simplified assumption
     freqs_cis: torch.Tensor, # Precomputed complex rotations, shape (max_seq_len, head_dim)
+    position_ids: torch.Tensor, # position_ids
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Applies RoPE rotations to Q and K using torch complex numbers."""
 
@@ -196,7 +197,7 @@ print(f"Calculated freqs_cis shape: {freqs_cis.shape}") # (max_pos_emb, head_dim
 
 # Apply RoPE
 # Note: RoPE is applied *before* repeating K/V for GQA
-query_states_rope, key_states_rope = apply_rotary_emb_torch(query_states, key_states, freqs_cis)
+query_states_rope, key_states_rope = apply_rotary_emb_torch(query_states, key_states, freqs_cis, position_ids=position_ids)
 
 print("\nShapes after RoPE:")
 print(f"  query_states_rope: {query_states_rope.shape}")
@@ -256,7 +257,8 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 # Repeat K and V heads
 key_states_repeated = repeat_kv(key_states_final, num_key_value_groups)
-value_states_repeated = repeat_kv(value_states, num_key_value_groups) # Use original value_states, RoPE/Norm not applied to V
+value_states_rope = apply_rotary_emb_torch(value_states, value_states, freqs_cis, position_ids=position_ids)[0]
+value_states_repeated = repeat_kv(value_states_rope, num_key_value_groups) # Use original value_states, RoPE/Norm not applied to V
 
 print("\nShapes after repeating K/V for GQA:")
 print(f"  key_states_repeated: {key_states_repeated.shape}")   # Should match Q heads dimension
@@ -369,20 +371,20 @@ class SimplifiedLlama4Attention(nn.Module):
 
     def forward(self, hidden_states, attention_mask, position_ids, freqs_cis=None):
         batch_size, sequence_length, _ = hidden_states.shape
-
+    
         # Projections
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-
+    
         # Reshape
         query_states = query_states.view(batch_size, sequence_length, self.num_attention_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, sequence_length, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(batch_size, sequence_length, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
+    
         # Apply RoPE
         current_freqs_cis = self.freqs_cis.to(hidden_states.device) # Get precomputed freqs
-        query_states_rope, key_states_rope = apply_rotary_emb_torch(query_states, key_states, current_freqs_cis)
+        query_states_rope, key_states_rope = apply_rotary_emb_torch(query_states, key_states, current_freqs_cis, position_ids=position_ids)
 
         # Optional QK Norm
         if self.use_qk_norm:

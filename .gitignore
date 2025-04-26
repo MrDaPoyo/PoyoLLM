@@ -6,3 +6,4 @@ log_finetune/*
 log/log.txt
 safeZone/*
 data/*
+output/*
