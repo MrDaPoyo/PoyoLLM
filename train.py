@@ -262,14 +262,13 @@ for epoch in range(num_epochs):
 
         generated_tokens = []
         with torch.no_grad():
-            for _ in range(50):  # Generate up to 50 tokens
+            for _ in range(50):
                 logits = model(context)
-                # Focus only on the last token for prediction
-                logits = logits[:, -1, :]  # Shape: (1, vocab_size)
+                logits = logits[:, -1, :]
                 probs = torch.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)  # Shape: (1, 1)
+                next_token = torch.multinomial(probs, num_samples=1)
                 generated_tokens.append(next_token.item())
-                context = torch.cat([context, next_token.unsqueeze(0)], dim=1)  # Append to context
+                context = torch.cat([context, next_token], dim=1)
 
         # Decode the generated tokens
         generated_text = enc.decode(generated_tokens)
