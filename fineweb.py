@@ -1,16 +1,6 @@
-"""
-FineWeb-Edu dataset (for srs pretraining)
-https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
-Downloads and tokenizes the data and saves data shards to disk.
-Run simply as:
-$ python fineweb.py
-Will save shards to the local directory "edu_fineweb10B".
-"""
-
 import os
 import multiprocessing as mp
 import numpy as np
-import tiktoken
 from datasets import load_dataset # pip install datasets
 from tqdm import tqdm # pip install tqdm
 
@@ -25,21 +15,9 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
 fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
+# Define the output file path for the raw text
 
-# init the tokenizer
-enc = tiktoken.get_encoding("gpt2")
-enc._special_tokens = {
-    "<|endoftext|>": 50256, # end of text token
-    "<|pad|>": 50257, # padding token
-    "<|sep|>": 50258, # separator token
-}
-eot = enc._special_tokens['<|endoftext|>'] # end of text token
-pad = enc._special_tokens['<|pad|>'] # padding token
-sep = enc._special_tokens['<|sep|>'] # padding token
 def tokenize(doc):
-    # tokenizes a single document and returns a numpy array of uint16 tokens
-    tokens = [eot] # the special <|endoftext|> token delimits all documents
-    tokens.extend(enc.encode_ordinary(doc["text"]))
     tokens_np = np.array(tokens)
     assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large for uint16"
     tokens_np_uint16 = tokens_np.astype(np.uint16)
