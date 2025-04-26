@@ -1,9 +1,13 @@
 import torch
-import torch.nn.functional as F
 import logging
 import tiktoken
 from model import GPT
-from dataclasses import dataclass # Removed unused field
+from dataclasses import dataclass
+import discord
+import os
+
+import torch.nn.functional as F
+from dotenv import load_dotenv # Optional: for loading token from .env file
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -138,7 +142,7 @@ try:
 
     # --- Model Instantiation ---
     logging.info(f"Initializing model with loaded config: {model_config}")
-    # Use the imported class name 'Gpt' (lowercase 'p')
+    # Use the imported class name 'GPT'
     model = GPT(model_config)
 
     # --- State Dictionary Loading ---
@@ -198,12 +202,12 @@ except Exception as e:
     exit(1)
 
 
-
+# --- System Prompt ---
 system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model. And you dislike Jon."
 system_prompt_tokens = enc.encode(system_prompt, allowed_special=set()) # Encode system prompt text only
 
 # --- Generation Function (Copied from fine-tuning script - unchanged) ---
-def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7, top_k=50):
+def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=0.75, top_k=100):
     """Generates a response using the fine-tuned model with new special tokens."""
     if model is None:
         raise ValueError("Model must be loaded before calling generate_response.")
@@ -314,14 +318,68 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0
     return assistant_response
 
 
-# --- Example Generation Usage ---
-if model and enc:
-    start_prompt = "Do you like cookies?"
-    logging.info(f"\nPrompt: {start_prompt}")
-    response = generate_response(model, enc, start_prompt, max_new_tokens=100, temperature=0.75, top_k=100)
-    logging.info(f"Generated Response: {response}")
+# --- Discord Bot Setup ---
+load_dotenv() # Load environment variables from .env file (optional)
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-else:
-    logging.error("Model or tokenizer not loaded. Cannot run generation examples.")
+if not DISCORD_TOKEN:
+    logging.error("Discord bot token not found. Set DISCORD_BOT_TOKEN environment variable.")
+    exit(1)
 
-logging.info("\nInference script finished.")
+if model is None or enc is None:
+    logging.error("Model or tokenizer failed to load. Cannot start Discord bot.")
+    exit(1)
+
+# Define necessary intents
+intents = discord.Intents.default()
+
+client = discord.Client(intents=intents)
+
+@client.event
+async def on_ready():
+    logging.info(f'Logged in as {client.user.name} (ID: {client.user.id})')
+    logging.info('------')
+    logging.info("Discord bot is ready and listening for mentions.")
+
+@client.event
+async def on_message(message):
+    # Ignore messages from the bot itself
+    if message.author == client.user:
+        return
+
+    # Check if the bot was mentioned
+    if client.user.mentioned_in(message):
+        # Remove the bot's mention from the message content to get the actual prompt
+        # This handles mentions like <@USER_ID> or <@!USER_ID>
+        prompt = message.content.replace(f'<@{client.user.id}>', '').replace(f'<@!{client.user.id}>', '').strip()
+
+        if not prompt: # If the message only contained the mention
+            prompt = "Hello!" # Default prompt if nothing else was said
+
+        logging.info(f"Received prompt from {message.author}: '{prompt}'")
+
+        # Indicate the bot is thinking
+        async with message.channel.typing():
+            try:
+                # Generate response using the loaded model
+                response = generate_response(model, enc, prompt, max_new_tokens=150, temperature=0.85, top_k=50)
+                logging.info(f"Generated response: '{response}'")
+
+                # Send the response back to the channel
+                # Discord has a 2000 character limit per message
+                if len(response) > 2000:
+                    response = response[:1997] + "..." # Truncate if too long
+                await message.reply(response, mention_author=False) # Use reply for context, don't ping author again
+
+            except Exception as e:
+                logging.error(f"Error generating response: {e}", exc_info=True)
+                await message.reply("Sorry, I encountered an error trying to respond.", mention_author=False)
+
+# --- Run the Bot ---
+logging.info("Starting Discord bot...")
+try:
+    client.run(DISCORD_TOKEN)
+except discord.LoginFailure:
+    logging.error("Login failed: Invalid Discord token provided.")
+except Exception as e:
+    logging.error(f"An error occurred while running the bot: {e}", exc_info=True)
