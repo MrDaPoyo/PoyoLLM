@@ -247,33 +247,4 @@ for epoch in range(num_epochs):
     avg_loss = total_loss / num_steps_per_epoch
     print(f"--- Epoch {epoch+1} Average Loss: {avg_loss:.4f} ---")
 
-    if (epoch + 1) % 25 == 0:
-        # Save the model checkpoint every 5 epochs
-        checkpoint_path = f"model_epoch_{epoch+1}.pth"
-        os.makedirs("output", exist_ok=True)
-        torch.save(model.state_dict(), "output/" + checkpoint_path)
-        print(f"Model checkpoint saved to {checkpoint_path}")
-
-        # --- Generate some text ---
-        model.eval()  # Set the model to evaluation mode
-        prompt = "<|system|>You are a helpful AI assistant.<|user|>Hello<|assistant|>"
-        encoded_prompt = enc.encode(prompt, allowed_special="all")
-        context = torch.tensor(encoded_prompt, dtype=torch.long, device=device).unsqueeze(0)
-
-        generated_tokens = []
-        with torch.no_grad():
-            for _ in range(50):
-                logits = model(context)
-                logits = logits[:, -1, :]
-                probs = torch.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-                generated_tokens.append(next_token.item())
-                context = torch.cat([context, next_token], dim=1)
-
-        # Decode the generated tokens
-        generated_text = enc.decode(generated_tokens)
-        print(f"Generated Text: {generated_text}")
-
-        model.train()  # Return to training mode
-
 print("Training finished.")
