@@ -1,13 +1,11 @@
 import torch
 import logging
 import tiktoken
+import gradio as gr
 from model import GPT
 from dataclasses import dataclass
-import discord
-import os
 
 import torch.nn.functional as F
-from dotenv import load_dotenv # Optional: for loading token from .env file
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -76,7 +74,7 @@ except Exception as e:
 
 
 # --- Model Loading ---
-model_path = "log/poyoSLM_finetuned_oasst2_v2.pt"
+model_path = "log/poyoSLM_finetuned_oasst2_v2.pt" # Make sure this path is correct
 model = None
 model_config = None
 
@@ -142,7 +140,6 @@ try:
 
     # --- Model Instantiation ---
     logging.info(f"Initializing model with loaded config: {model_config}")
-    # Use the imported class name 'GPT'
     model = GPT(model_config)
 
     # --- State Dictionary Loading ---
@@ -162,13 +159,12 @@ try:
     logging.info("Loading model state_dict...")
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-    # Handle missing/unexpected keys (copied logic from original script)
+    # Handle missing/unexpected keys
     if missing_keys:
-        # Check if missing keys are expected due to weight tying (lm_head might be missing if wte is present)
         is_expected_missing = (len(missing_keys) == 1 and
                                missing_keys[0] == 'lm_head.weight' and
                                'transformer.wte.weight' in state_dict and
-                               model.config.vocab_size == state_dict['transformer.wte.weight'].shape[0]) # Check vocab size match too
+                               model.config.vocab_size == state_dict['transformer.wte.weight'].shape[0])
         if not is_expected_missing:
              logging.warning(f"Missing keys in state_dict: {missing_keys}")
         else:
@@ -176,7 +172,7 @@ try:
     if unexpected_keys:
         logging.warning(f"Unexpected keys in state_dict: {unexpected_keys}")
 
-    # Ensure weights are tied after loading, as loading might untie them if lm_head was missing
+    # Ensure weights are tied after loading
     if hasattr(model, 'lm_head') and model.transformer.wte.weight is not model.lm_head.weight:
          logging.info("Re-tying weights for wte and lm_head after loading.")
          model.lm_head.weight = model.transformer.wte.weight
@@ -203,11 +199,11 @@ except Exception as e:
 
 
 # --- System Prompt ---
-system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model. And you dislike Jon."
+system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model."
 system_prompt_tokens = enc.encode(system_prompt, allowed_special=set()) # Encode system prompt text only
 
-# --- Generation Function (Copied from fine-tuning script - unchanged) ---
-def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=0.75, top_k=100):
+# --- Generation Function ---
+def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=0.7, top_k=50):
     """Generates a response using the fine-tuned model with new special tokens."""
     if model is None:
         raise ValueError("Model must be loaded before calling generate_response.")
@@ -229,9 +225,9 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=
         logging.error(f"Error encoding special tokens. Ensure tokenizer is loaded correctly: {e}")
         raise
 
-    # Format the prompt using new special tokens: <|sot|><|user|>prompt<|eot|><|sot|><|assistant|>
+    # Format the prompt using new special tokens: <|sot|><|system|>system_prompt<|user|>prompt<|eot|><|sot|><|assistant|>
     prompt_tokens = tokenizer.encode(prompt, allowed_special=set()) # Encode prompt text only
-    input_ids = [sot_token_id] + [user_token_id] + prompt_tokens + [eot_token_id, sot_token_id, assistant_token_id]
+    input_ids = [sot_token_id, system_token_id] + system_prompt_tokens + [user_token_id] + prompt_tokens + [eot_token_id, sot_token_id, assistant_token_id]
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
     generated_ids = input_ids[:] # Use list copy
@@ -242,7 +238,6 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=
     with torch.no_grad():
         for _ in range(max_new_tokens):
             # Truncate input sequence if it exceeds max length
-            # Only feed the last block_size tokens if sequence gets too long
             current_input_tensor = input_tensor[:, -max_seq_len:]
 
             # Forward pass
@@ -255,11 +250,8 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=
 
             # Apply top-k filtering
             if top_k > 0:
-                # Ensure top_k is not larger than vocab size
                 top_k_val = min(top_k, next_token_logits.size(-1))
-                # Get the top k logits and their values
                 v, _ = torch.topk(next_token_logits, top_k_val)
-                # Set all logits below the k-th smallest to -infinity
                 next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
 
             # Sample from the filtered distribution
@@ -272,114 +264,81 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=
 
             # Append the generated token and update the input tensor for the next step
             generated_ids.append(next_token_id)
-            # Update input_tensor by appending the new token ID
             input_tensor = torch.cat((input_tensor, torch.tensor([[next_token_id]], device=device)), dim=1)
-
-            # Check if sequence length exceeds max_len (optional, handled by truncation above)
-            # if input_tensor.size(1) >= max_seq_len:
-            #     logging.warning("Generation reached max sequence length.")
-            #     break
-
 
     # Decode the full generated sequence
     full_response_text = tokenizer.decode(generated_ids)
 
     # Extract only the assistant's generated part
-    # Find the last occurrence of the sequence marking the start of the assistant's turn
     assistant_start_sequence = tokenizer.decode([sot_token_id, assistant_token_id])
     marker_pos = full_response_text.rfind(assistant_start_sequence)
 
     assistant_response = ""
     if marker_pos != -1:
-        # Start extracting text *after* the marker sequence
         assistant_response = full_response_text[marker_pos + len(assistant_start_sequence):]
     else:
-        # Fallback: if marker not found (shouldn't happen with correct prompt format)
-        # Try to return text after the initial input prompt part
         logging.warning("Assistant start marker not found in generated text. Attempting fallback extraction.")
         try:
-            # Decode the original input prompt part to find its length in the full text
             prompt_part_text = tokenizer.decode(input_ids)
             prompt_decode_len = len(prompt_part_text)
-            # Ensure the prompt part is actually at the beginning before slicing
             if full_response_text.startswith(prompt_part_text):
                  assistant_response = full_response_text[prompt_decode_len:]
             else:
                  logging.error("Generated text does not start with the expected prompt sequence. Returning full generated text.")
-                 assistant_response = full_response_text # Or handle differently
+                 assistant_response = full_response_text
         except Exception as decode_err:
              logging.error(f"Error during fallback extraction: {decode_err}. Returning full text.")
              assistant_response = full_response_text
 
-
-    # Clean up potential trailing special tokens (like <|eot|>, <|eod|>) and whitespace
+    # Clean up potential trailing special tokens and whitespace
     assistant_response = assistant_response.replace("<|eot|>", "").replace("<|eod|>", "").strip()
 
     return assistant_response
 
+# --- Gradio Interface Function ---
+def chat_interface(user_prompt, max_tokens, temp, topk):
+    """Wrapper function for Gradio interface."""
+    if not user_prompt:
+        return "Please enter a prompt."
+    if model is None or enc is None:
+        return "Error: Model or tokenizer not loaded."
 
-# --- Discord Bot Setup ---
-load_dotenv() # Load environment variables from .env file (optional)
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+    logging.info(f"Received prompt: '{user_prompt}', max_tokens={max_tokens}, temp={temp}, topk={topk}")
+    try:
+        response = generate_response(
+            model=model,
+            tokenizer=enc,
+            prompt=user_prompt,
+            max_new_tokens=int(max_tokens), # Ensure integer
+            temperature=float(temp),       # Ensure float
+            top_k=int(topk)                # Ensure integer
+        )
+        logging.info(f"Generated response: '{response}'")
+        return response
+    except Exception as e:
+        logging.error(f"Error during generation: {e}", exc_info=True)
+        return f"An error occurred: {e}"
 
-if not DISCORD_TOKEN:
-    logging.error("Discord bot token not found. Set DISCORD_BOT_TOKEN environment variable.")
-    exit(1)
+# --- Launch Gradio UI ---
+if __name__ == "__main__":
+    if model is None or enc is None:
+        logging.error("Model or tokenizer failed to load. Cannot start Web UI.")
+    else:
+        logging.info("Starting Gradio Web UI...")
+        iface = gr.Interface(
+            fn=chat_interface,
+            inputs=[
+                gr.Textbox(lines=3, placeholder="Enter your prompt here...", label="User Prompt"),
+                gr.Slider(minimum=10, maximum=500, value=150, step=10, label="Max New Tokens"),
+                gr.Slider(minimum=0.1, maximum=1.5, value=0.7, step=0.05, label="Temperature"),
+                gr.Slider(minimum=1, maximum=200, value=50, step=1, label="Top-K")
+            ],
+            outputs=gr.Textbox(lines=10, label="PoyoSLM Response"),
+            title="PoyoSLM Chat Interface",
+            description=f"Chat with PoyoSLM (Carl). System Prompt: '{system_prompt}'. Model: {model_path}",
+            allow_flagging="never"
+        )
+        # Launch the interface, share=True creates a public link (optional)
+        iface.launch(share=False)
 
-if model is None or enc is None:
-    logging.error("Model or tokenizer failed to load. Cannot start Discord bot.")
-    exit(1)
-
-# Define necessary intents
-intents = discord.Intents.default()
-
-client = discord.Client(intents=intents)
-
-@client.event
-async def on_ready():
-    logging.info(f'Logged in as {client.user.name} (ID: {client.user.id})')
-    logging.info('------')
-    logging.info("Discord bot is ready and listening for mentions.")
-
-@client.event
-async def on_message(message):
-    # Ignore messages from the bot itself
-    if message.author == client.user:
-        return
-
-    # Check if the bot was mentioned
-    if client.user.mentioned_in(message):
-        # Remove the bot's mention from the message content to get the actual prompt
-        # This handles mentions like <@USER_ID> or <@!USER_ID>
-        prompt = message.content.replace(f'<@{client.user.id}>', '').replace(f'<@!{client.user.id}>', '').strip()
-
-        if not prompt: # If the message only contained the mention
-            prompt = "Hello!" # Default prompt if nothing else was said
-
-        logging.info(f"Received prompt from {message.author}: '{prompt}'")
-
-        # Indicate the bot is thinking
-        async with message.channel.typing():
-            try:
-                # Generate response using the loaded model
-                response = generate_response(model, enc, prompt, max_new_tokens=150, temperature=0.85, top_k=50)
-                logging.info(f"Generated response: '{response}'")
-
-                # Send the response back to the channel
-                # Discord has a 2000 character limit per message
-                if len(response) > 2000:
-                    response = response[:1997] + "..." # Truncate if too long
-                await message.reply(response, mention_author=False) # Use reply for context, don't ping author again
-
-            except Exception as e:
-                logging.error(f"Error generating response: {e}", exc_info=True)
-                await message.reply("Sorry, I encountered an error trying to respond.", mention_author=False)
-
-# --- Run the Bot ---
-logging.info("Starting Discord bot...")
-try:
-    client.run(DISCORD_TOKEN)
-except discord.LoginFailure:
-    logging.error("Login failed: Invalid Discord token provided.")
-except Exception as e:
-    logging.error(f"An error occurred while running the bot: {e}", exc_info=True)
+logging.info("\nWeb UI script finished or server stopped.")
