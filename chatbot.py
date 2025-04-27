@@ -231,7 +231,7 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=
 
     # Format the prompt using new special tokens: <|sot|><|system|>system_prompt<|user|>prompt<|eot|><|sot|><|assistant|>
     prompt_tokens = tokenizer.encode(prompt, allowed_special=set()) # Encode prompt text only
-    input_ids = [sot_token_id, system_token_id] + system_prompt_tokens + [user_token_id] + prompt_tokens + [eot_token_id, sot_token_id, assistant_token_id]
+    input_ids = [sot_token_id] + [user_token_id] + prompt_tokens + [eot_token_id, sot_token_id, assistant_token_id]
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
     generated_ids = input_ids[:] # Use list copy
