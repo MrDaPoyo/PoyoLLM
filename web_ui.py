@@ -199,7 +199,7 @@ except Exception as e:
 
 
 # --- System Prompt ---
-system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model."
+system_prompt = "My name is Carl, or PoyoSLM. I like cookies and making bad jokes. I am not a language model."
 system_prompt_tokens = enc.encode(system_prompt, allowed_special=set()) # Encode system prompt text only
 
 # --- Generation Function ---
