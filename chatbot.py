@@ -203,11 +203,7 @@ except Exception as e:
 
 
 # --- System Prompt ---
-system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model. And you dislike Jon."
-system_prompt_tokens = enc.encode(system_prompt, allowed_special=set()) # Encode system prompt text only
-
-# --- Generation Function (Copied from fine-tuning script - unchanged) ---
-def generate_response(model, tokenizer, prompt, max_new_tokens=150, temperature=0.75, top_k=100):
+def generate_response(model, tokenizer, prompt, max_new_tokens=250, temperature=0.95, top_k=50):
     """Generates a response using the fine-tuned model with new special tokens."""
     if model is None:
         raise ValueError("Model must be loaded before calling generate_response.")
@@ -362,7 +358,7 @@ async def on_message(message):
         async with message.channel.typing():
             try:
                 # Generate response using the loaded model
-                response = generate_response(model, enc, prompt, max_new_tokens=150, temperature=0.85, top_k=50)
+                response = generate_response(model, enc, prompt, max_new_tokens=250, temperature=0.8, top_k=500)
                 logging.info(f"Generated response: '{response}'")
 
                 # Send the response back to the channel
