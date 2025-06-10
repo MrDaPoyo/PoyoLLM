@@ -70,7 +70,6 @@ model_path = "log/poyoSLM_finetuned_oasst2_v2.pt"
 model = None
 model_config = None
 
-torch.serialization.add_safe_globals([GPTConfig])
 logging.info(f"Loading model checkpoint from {model_path}...")
 try:
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
