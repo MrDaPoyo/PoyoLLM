@@ -1,9 +1,8 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 import torch
 import logging
 import tiktoken
 from dataclasses import dataclass
-
 import torch.nn.functional as F
 from model import GPT  # Ensure this file exists and defines the GPT model
 
@@ -157,7 +156,7 @@ except Exception as e:
 system_prompt = "Your name is Carl, or PoyoSLM. You like cookies and making bad jokes. You are not a language model. And you dislike Jon."
 system_prompt_tokens = enc.encode(system_prompt, allowed_special=set())
 
-def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7, top_k=50):
+def generate_response_stream(model, tokenizer, prompt, max_new_tokens=50, temperature=0.7, top_k=50):
     if model is None or tokenizer is None:
         raise ValueError("Model and tokenizer must be loaded.")
     model.eval()
@@ -181,6 +180,7 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0
     max_seq_len = model.config.block_size
     stop_token_ids = {eot_token_id, eod_token_id}
 
+    # Stream generated tokens as they are produced.
     with torch.no_grad():
         for _ in range(max_new_tokens):
             current_input_tensor = input_tensor[:, -max_seq_len:]
@@ -198,19 +198,18 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0
                 break
             generated_ids.append(next_token_id)
             input_tensor = torch.cat((input_tensor, torch.tensor([[next_token_id]], device=device)), dim=1)
+            # Decode the latest token and yield it.
+            token_text = tokenizer.decode([next_token_id])
+            yield token_text
 
-    full_response_text = tokenizer.decode(generated_ids)
-    assistant_start_sequence = tokenizer.decode([sot_token_id, assistant_token_id])
-    marker_pos = full_response_text.rfind(assistant_start_sequence)
-
-    if marker_pos != -1:
-        assistant_response = full_response_text[marker_pos + len(assistant_start_sequence):]
-    else:
-        logging.warning("Assistant start marker not found. Returning full text.")
-        assistant_response = full_response_text
-
-    assistant_response = assistant_response.replace("<|eot|>", "").replace("<|eod|>", "").strip()
-    return assistant_response
+@stream_with_context
+def stream_response(prompt, max_new_tokens, temperature, top_k):
+    try:
+        for token in generate_response_stream(model, enc, prompt, max_new_tokens, temperature, top_k):
+            yield token
+    except Exception as e:
+        logging.error(f"Error during streaming: {e}")
+        yield f"\n[Error: {e}]"
 
 # --- Flask API Setup ---
 app = Flask(__name__)
@@ -224,12 +223,7 @@ def generate():
     max_new_tokens = data.get('max_new_tokens', 150)
     temperature = data.get('temperature', 1)
     top_k = data.get('top_k', 50)
-    try:
-        response_text = generate_response(model, enc, prompt, max_new_tokens, temperature, top_k)
-        return jsonify({"response": response_text})
-    except Exception as e:
-        logging.error(f"Error generating response: {e}")
-        return jsonify({"error": str(e)}), 500
+    return Response(stream_response(prompt, max_new_tokens, temperature, top_k), mimetype="text/plain")
 
 @app.route('/', methods=['GET'])
 def index():
