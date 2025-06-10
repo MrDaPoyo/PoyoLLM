@@ -238,8 +238,29 @@ def index():
     <html>
     <head>
         <title>PoyoSLM Demo</title>
+        <style>
+            .spinner {
+                border: 4px solid rgba(0, 0, 0, 0.1);
+                width: 36px;
+                height: 36px;
+                border-radius: 50%;
+                border-left-color: #09f;
+                animation: spin 1s linear infinite;
+                display: inline-block;
+                vertical-align: middle;
+            }
+            @keyframes spin {
+                to { transform: rotate(360deg); }
+            }
+        </style>
         <script>
             async function fetchResponse() {
+                const button = document.getElementById("generateButton");
+                const spinner = document.getElementById("spinner");
+                const result = document.getElementById("result");
+                button.disabled = true; // lock the button
+                spinner.style.display = "inline-block"; // show spinner
+                result.innerText = "";
                 const prompt = document.getElementById("prompt").value;
                 try {
                     const response = await fetch("/generate", {
@@ -251,20 +272,23 @@ def index():
                     });
                     const data = await response.json();
                     if (response.ok) {
-                        document.getElementById("result").innerText = data.response;
+                        result.innerText = data.response;
                     } else {
-                        document.getElementById("result").innerText = "Error: " + data.error;
+                        result.innerText = "Error: " + data.error;
                     }
                 } catch (error) {
-                    document.getElementById("result").innerText = "Fetch error: " + error;
+                    result.innerText = "Fetch error: " + error;
                 }
+                spinner.style.display = "none"; // hide spinner
+                button.disabled = false; // unlock the button
             }
         </script>
     </head>
     <body>
         <h1>Generate Response</h1>
         <textarea id="prompt" rows="4" cols="50" placeholder="Enter your prompt here"></textarea><br/>
-        <button onclick="fetchResponse()">Generate</button>
+        <button id="generateButton" onclick="fetchResponse()">Generate</button>
+        <div id="spinner" class="spinner" style="display:none;"></div>
         <h2>Response:</h2>
         <pre id="result"></pre>
     </body>
