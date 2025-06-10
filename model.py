@@ -74,8 +74,6 @@ class GPTConfig:
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
 
-torch.serialization.safe_globals([GPTConfig])
-
 class GPT(nn.Module):
 
     def __init__(self, config = GPTConfig()):
