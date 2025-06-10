@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import torch
 import logging
 import tiktoken
@@ -233,67 +233,7 @@ def generate():
 
 @app.route('/', methods=['GET'])
 def index():
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>PoyoSLM Demo</title>
-        <style>
-            .spinner {
-                border: 4px solid rgba(0, 0, 0, 0.1);
-                width: 36px;
-                height: 36px;
-                border-radius: 50%;
-                border-left-color: #09f;
-                animation: spin 1s linear infinite;
-                display: inline-block;
-                vertical-align: middle;
-            }
-            @keyframes spin {
-                to { transform: rotate(360deg); }
-            }
-        </style>
-        <script>
-            async function fetchResponse() {
-                const button = document.getElementById("generateButton");
-                const spinner = document.getElementById("spinner");
-                const result = document.getElementById("result");
-                button.disabled = true; // lock the button
-                spinner.style.display = "inline-block"; // show spinner
-                result.innerText = "";
-                const prompt = document.getElementById("prompt").value;
-                try {
-                    const response = await fetch("/generate", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        },
-                        body: JSON.stringify({prompt: prompt})
-                    });
-                    const data = await response.json();
-                    if (response.ok) {
-                        result.innerText = data.response;
-                    } else {
-                        result.innerText = "Error: " + data.error;
-                    }
-                } catch (error) {
-                    result.innerText = "Fetch error: " + error;
-                }
-                spinner.style.display = "none"; // hide spinner
-                button.disabled = false; // unlock the button
-            }
-        </script>
-    </head>
-    <body>
-        <h1>Generate Response</h1>
-        <textarea id="prompt" rows="4" cols="50" placeholder="Enter your prompt here"></textarea><br/>
-        <button id="generateButton" onclick="fetchResponse()">Generate</button>
-        <div id="spinner" class="spinner" style="display:none;"></div>
-        <h2>Response:</h2>
-        <pre id="result"></pre>
-    </body>
-    </html>
-    '''
+    return send_file('index.html')
 
 if __name__ == '__main__':
     app.run(debug=False)
