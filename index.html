@@ -1,23 +1,82 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <title>PoyoSLM Demo</title>
+        <title>PoyoLLM Chat Demo</title>
         <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                background: #f5f5f5;
+            }
+            .chat-container {
+                max-width: 600px;
+                margin: 20px auto;
+                background: #fff;
+                border-radius: 5px;
+                box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                display: flex;
+                flex-direction: column;
+                height: 80vh;
+            }
+            .chat-messages {
+                flex: 1;
+                padding: 15px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+            .message {
+                padding: 10px 15px;
+                border-radius: 20px;
+                max-width: 75%;
+            }
+            .user-message {
+                background: #007bff;
+                color: #fff;
+                align-self: flex-end;
+            }
+            .bot-message {
+                background: #e9ecef;
+                color: #333;
+                align-self: flex-start;
+            }
+            .input-area {
+                display: flex;
+                padding: 10px;
+                border-top: 1px solid #ddd;
+            }
+            .input-area textarea {
+                flex: 1;
+                resize: none;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            .input-area button {
+                margin-left: 10px;
+                padding: 10px 20px;
+                border: none;
+                background: #28a745;
+                color: #fff;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+            .input-area button:disabled {
+                background: #94d3a2;
+            }
             .spinner {
-                border: 4px solid rgba(0, 0, 0, 0.1);
-                width: 1vh;
-                height: 1vh;
+                border: 4px solid rgba(0,0,0,0.1);
+                width: 1.5em;
+                height: 1.5em;
                 border-radius: 50%;
                 border-left-color: blue;
                 animation: spin 1s linear infinite;
                 display: inline-block;
                 vertical-align: middle;
-            }
-            #result {
-                margin-top: 20px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                text-wrap: break-word;
+                margin-right: 5px;
             }
             @keyframes spin {
                 to {
@@ -28,54 +87,65 @@
         <script>
             async function fetchResponse() {
                 const button = document.getElementById("generateButton");
-                const spinner = document.getElementById("spinner");
-                const result = document.getElementById("result");
-                button.disabled = true; // lock the button
-                spinner.style.display = "inline-block"; // show spinner
-                result.innerText = "";
-                const prompt = document.getElementById("prompt").value;
+                const input = document.getElementById("prompt");
+                const chatMessages = document.getElementById("chatMessages");
+                const userText = input.value.trim();
+                if (!userText) return;
+    
+                const userMessage = document.createElement("div");
+                userMessage.className = "message user-message";
+                userMessage.innerText = userText;
+                chatMessages.appendChild(userMessage);
+                input.value = "";
+    
+                const botMessage = document.createElement("div");
+                botMessage.className = "message bot-message";
+                botMessage.innerHTML = '<span id="spinner" class="spinner"></span>';
+                chatMessages.appendChild(botMessage);
+    
+                button.disabled = true;
+    
                 try {
                     const response = await fetch("/generate", {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json",
                         },
-                        body: JSON.stringify({ prompt: prompt }),
+                        body: JSON.stringify({ prompt: userText }),
                     });
+    
                     if (!response.ok) {
-                        result.innerText = "Error: " + await response.text();
+                        botMessage.innerText = "Error: " + await response.text();
                     } else {
                         const reader = response.body.getReader();
                         const decoder = new TextDecoder();
                         let done = false;
+                        botMessage.innerHTML = "";
                         while (!done) {
                             const { value, done: doneReading } = await reader.read();
                             done = doneReading;
                             if (value) {
                                 const chunk = decoder.decode(value);
-                                result.innerText += chunk;
+                                botMessage.innerText += chunk;
                             }
                         }
                     }
                 } catch (error) {
-                    result.innerText = "Fetch error: " + error;
+                    botMessage.innerText = "Fetch error: " + error;
                 }
-                spinner.style.display = "none"; // hide spinner
-                button.disabled = false; // unlock the button
+    
+                button.disabled = false;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
             }
         </script>
     </head>
     <body>
-        <h1>Generate Response</h1>
-        <textarea
-            id="prompt"
-            rows="4"
-            cols="50"
-            placeholder="Enter your prompt here"
-        ></textarea><br />
-        <button id="generateButton" onclick="fetchResponse()">Generate</button>
-        <div id="spinner" class="spinner" style="display: none"></div>
-        <h2>Response:</h2>
-        <pre id="result"></pre>
+        <div class="chat-container">
+            <div id="chatMessages" class="chat-messages"></div>
+            <div class="input-area">
+                <textarea id="prompt" rows="2" placeholder="Enter your message"></textarea>
+                <button id="generateButton" onclick="fetchResponse()">Send</button>
+            </div>
+        </div>
     </body>
 </html>
