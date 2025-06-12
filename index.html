@@ -9,13 +9,14 @@
                 padding: 0;
                 background: #121212; /* Dark background */
                 color: #e0e0e0; /* Light text for body */
+                text-align: center;
             }
             .chat-container {
                 max-width: 600px;
                 margin: 20px auto;
-                background: #1e1e1e; /* Darker container background */
+                background: #1e1e1e;
                 border-radius: 5px;
-                box-shadow: 0 0 10px rgba(0,0,0,0.5); /* Adjusted shadow for dark theme */
+                box-shadow: 0 0 10px rgba(0,0,0,0.5);
                 display: flex;
                 flex-direction: column;
                 height: 80vh;
@@ -34,41 +35,41 @@
                 max-width: 75%;
             }
             .user-message {
-                background: #005f99; /* Darker blue for user messages */
+                background: #005f99;
                 color: #fff;
                 align-self: flex-end;
             }
             .bot-message {
-                background: #333333; /* Dark grey for bot messages */
-                color: #e0e0e0; /* Light text for bot messages */
+                background: #333333;
+                color: #e0e0e0;
                 align-self: flex-start;
             }
             .input-area {
                 display: flex;
                 padding: 10px;
-                border-top: 1px solid #333; /* Darker border */
+                border-top: 1px solid #333;
             }
             .input-area textarea {
                 flex: 1;
                 resize: none;
-                border: 1px solid #444; /* Darker border for textarea */
+                border: 1px solid #444;
                 border-radius: 5px;
                 padding: 10px;
                 font-size: 14px;
-                background: #2c2c2c; /* Dark background for textarea */
-                color: #e0e0e0; /* Light text for textarea */
+                background: #2c2c2c;
+                color: #e0e0e0;
             }
             .input-area button {
                 margin-left: 10px;
                 padding: 10px 20px;
                 border: none;
-                background: #1a73e8; /* A suitable blue for dark theme button */
+                background: #1a73e8;
                 color: #fff;
                 border-radius: 5px;
                 cursor: pointer;
             }
             .input-area button:disabled {
-                background: #124a8f; /* Darker disabled button */
+                background: #124a8f;
                 color: #aaa;
             }
             .thinking-indicator {
@@ -93,6 +94,11 @@
             }
         </style>
         <script>
+            function scrollToBottom() {
+                const chatMessages = document.getElementById("chatMessages");
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
             async function fetchResponse() {
                 const button = document.getElementById("generateButton");
                 const input = document.getElementById("prompt");
@@ -104,6 +110,7 @@
                 userMessage.className = "message user-message";
                 userMessage.innerText = userText;
                 chatMessages.appendChild(userMessage);
+                scrollToBottom(); // Scroll after user message
                 input.value = "";
     
                 const botMessage = document.createElement("div");
@@ -111,6 +118,7 @@
                 // Use the new thinking indicator
                 botMessage.innerHTML = '<span class="thinking-indicator"></span>'; 
                 chatMessages.appendChild(botMessage);
+                scrollToBottom(); // Scroll after bot message appears
     
                 button.disabled = true;
     
@@ -125,6 +133,7 @@
     
                     if (!response.ok) {
                         botMessage.innerText = "Error: " + await response.text();
+                        scrollToBottom();
                     } else {
                         const reader = response.body.getReader();
                         const decoder = new TextDecoder();
@@ -136,19 +145,32 @@
                             if (value) {
                                 const chunk = decoder.decode(value);
                                 botMessage.innerText += chunk;
+                                scrollToBottom(); // Scroll as text streams in
                             }
                         }
                     }
                 } catch (error) {
                     botMessage.innerText = "Fetch error: " + error;
+                    scrollToBottom();
                 }
     
                 button.disabled = false;
-                chatMessages.scrollTop = chatMessages.scrollHeight;
             }
+
+            // Also allow Enter key to send message
+            document.addEventListener('DOMContentLoaded', function() {
+                const input = document.getElementById("prompt");
+                input.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        fetchResponse();
+                    }
+                });
+            });
         </script>
     </head>
     <body>
+        <h1>PoyoSLM chat</h1>
         <div class="chat-container">
             <div id="chatMessages" class="chat-messages"></div>
             <div class="input-area">
