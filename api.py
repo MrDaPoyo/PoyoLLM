@@ -3,6 +3,8 @@ import torch
 import logging
 import tiktoken
 from dataclasses import dataclass
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import torch.nn.functional as F
 from model import GPT  # Ensure this file exists and defines the GPT model
 
@@ -226,6 +228,14 @@ def generate():
     return Response(stream_response(prompt, max_new_tokens, temperature, top_k), mimetype="text/plain")
 
 @app.route('/', methods=['GET'])
+# Initialize Flask-Limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["10 per minute"]
+)
+
+@limiter.limit("5 per minute")
 def index():
     return send_file('index.html')
 
