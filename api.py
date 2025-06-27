@@ -227,14 +227,13 @@ def generate():
     top_k = data.get('top_k', 50)
     return Response(stream_response(prompt, max_new_tokens, temperature, top_k), mimetype="text/plain")
 
-@app.route('/', methods=['GET'])
-# Initialize Flask-Limiter
 limiter = Limiter(
     get_remote_address,
     app=app,
     default_limits=["10 per minute"]
 )
 
+@app.route('/', methods=['GET'])
 @limiter.limit("5 per minute")
 def index():
     return send_file('index.html')
