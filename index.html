@@ -1,15 +1,18 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <title>PoyoLLM Chat Demo</title>
+        <title>PoyoSLM Chat Demo</title>
         <style>
             body {
-                font-family: Arial, sans-serif;
+                font-family: "Segoe UI", sans-serif;
                 margin: 0;
                 padding: 0;
-                background: #121212; /* Dark background */
-                color: #e0e0e0; /* Light text for body */
+                background: #121212;
+                color: #e0e0e0;
                 text-align: center;
+            }
+            h1 {
+                margin-bottom: 0;
             }
             .chat-container {
                 max-width: 600px;
@@ -60,6 +63,7 @@
                 font-size: 14px;
                 background: #2c2c2c;
                 color: #e0e0e0;
+                font-family: 'Segoe UI', sans-serif;
             }
             .input-area button {
                 margin-left: 10px;
@@ -112,16 +116,15 @@
                 userMessage.className = "message user-message";
                 userMessage.innerText = userText;
                 chatMessages.appendChild(userMessage);
-                scrollToBottom(); // Scroll after user message
+                scrollToBottom();
                 input.value = "";
     
                 const botMessage = document.createElement("div");
                 botMessage.className = "message bot-message";
-                // Use the new thinking indicator
                 botMessage.innerHTML = '<span class="thinking-indicator"></span>'; 
                 chatMessages.appendChild(botMessage);
-                scrollToBottom(); // Scroll after bot message appears
-    
+                scrollToBottom();
+
                 button.disabled = true;
     
                 try {
@@ -140,14 +143,14 @@
                         const reader = response.body.getReader();
                         const decoder = new TextDecoder();
                         let done = false;
-                        botMessage.innerHTML = ""; // Clear the thinking indicator
+                        botMessage.innerHTML = "";
                         while (!done) {
                             const { value, done: doneReading } = await reader.read();
                             done = doneReading;
                             if (value) {
                                 const chunk = decoder.decode(value);
                                 botMessage.innerText += chunk;
-                                scrollToBottom(); // Scroll as text streams in
+                                scrollToBottom();
                             }
                         }
                     }
@@ -159,7 +162,6 @@
                 button.disabled = false;
             }
 
-            // Also allow Enter key to send message
             document.addEventListener('DOMContentLoaded', function() {
                 const input = document.getElementById("prompt");
                 input.addEventListener('keypress', function(e) {
@@ -172,7 +174,8 @@
         </script>
     </head>
     <body>
-        <h1>PoyoSLM chat</h1>
+        <h1>PoyoSLM chat demonstration! :D</h1>
+        <p>Beware, it does not make any sense at all.<br>Yes I trained this.</p>
         <div class="chat-container">
             <div id="chatMessages" class="chat-messages"></div>
             <div class="input-area">
